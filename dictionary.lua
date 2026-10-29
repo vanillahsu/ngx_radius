@@ -3,7 +3,13 @@ Dictionary.__index = Dictionary
 
 -- 內部簡單的日誌函數，模擬 Perl 中的 Logger
 local function _log(level, msg)
-    print(string.format("[%s] %s", level, msg))
+    local levels = {
+        ERROR = ngx.ERR,
+        WARNING = ngx.WARN,
+        DEBUG = ngx.DEBUG,
+        INFO = ngx.INFO
+    }
+    ngx.log(levels[level] or ngx.ERR, msg)
 end
 
 function Dictionary.new()
@@ -15,6 +21,8 @@ function Dictionary.new()
     self.ValNum = {}     -- ValNum{attrname}->{valuenum}
     self.VendorName = {} -- VendorName{vendorname}
     self.VendorNum = {}  -- VendorNum{vendornum}
+    self.loaded_files = {} -- 防止循環引用與重複載入
+    self.current_vendor_name = nil -- 當前廠商名稱
     return self
 end
 
@@ -31,6 +39,12 @@ function Dictionary:resolve_flags(name, vendor, flags)
 end
 
 function Dictionary:load_file(filename)
+    if self.loaded_files[filename] then
+        _log("INFO", "Skipping already loaded file: " .. filename)
+        return true
+    end
+    self.loaded_files[filename] = true
+
     local file = io.open(filename, "r")
     if not file then
         _log("ERROR", "Could not open dictionary file '" .. filename .. "'")
@@ -50,6 +64,9 @@ function Dictionary:load_handle(handle, handledesc)
     local re_val = "^VALUE\\s+(\\S+)\\s+(\\S+)\\s+(\\d+)"
     local re_vendor = "^VENDOR\\s+(\\S+)\\s+(\\S+)\\s*(.*)"
     local re_vendor_code = "^VENDOR_CODE\\s+(\\S+)\\s+(\\S+)\\s*(.*)"
+    local re_include = "^\\s*\\$INCLUDE\\s+(\\S+)\\s*$"
+    local re_begin_vendor = "^\\s*BEGIN-VENDOR\\s+(\\S+)\\s*$"
+    local re_end_vendor = "^\\s*END-VENDOR\\s+(\\S+)\\s*$"
 
     while true do
         local l = handle:read("*l")
@@ -68,7 +85,11 @@ function Dictionary:load_handle(handle, handledesc)
             if flag2 and flag2 ~= "" then
                 _log("WARNING", "Ignoring trailing garbage '" .. flag2 .. "' in Diameter dictionary " .. handledesc)
             end
-            self:defineAttr(tonumber(num), 0, name, atype, flag1)
+            local vendor_id = 0
+            if self.current_vendor_name and self.VendorName[self.current_vendor_name] then
+                vendor_id = self.VendorName[self.current_vendor_name][2]
+            end
+            self:defineAttr(tonumber(num), vendor_id, name, atype, flag1)
             goto continue
         end
 
@@ -77,7 +98,7 @@ function Dictionary:load_handle(handle, handledesc)
         if captures then
             local v_key, v_name, v_attrnum, v_type, v_flag1, v_flag2 = captures[1], captures[2], captures[3], captures[4], captures[5], captures[6]
             if v_key == "VENDORATTR" or v_key == "VSA" or v_key == "VENDOR_ATTRIBUTE" then
-                print("DEBUG: VENDORATTR match: key="..v_key..", name="..v_name..", num="..v_attrnum..", type="..v_type..", flag1="..v_flag1)
+                _log("DEBUG", "VENDORATTR match: key="..v_key..", name="..v_name..", num="..v_attrnum..", type="..v_type..", flag1="..v_flag1)
                 local vendor = v_name
                 -- 如果 vendor 是名稱，嘗試從 VendorName 查表轉為數字
                 if self.VendorName[v_name] then
@@ -138,6 +159,27 @@ function Dictionary:load_handle(handle, handledesc)
 
         if captures then
             self:defineVendor(captures[1], tonumber(captures[2]), captures[3])
+            goto continue
+        end
+
+        -- 5. $INCLUDE pattern: $INCLUDE filename
+        captures = ngx.re.match(l, re_include, "jo")
+        if captures then
+            self:load_file(captures[1])
+            goto continue
+        end
+
+        -- 6. BEGIN-VENDOR pattern: BEGIN-VENDOR <name>
+        captures = ngx.re.match(l, re_begin_vendor, "jo")
+        if captures then
+            self.current_vendor_name = captures[1]
+            goto continue
+        end
+
+        -- 7. END-VENDOR pattern: END-VENDOR <name>
+        captures = ngx.re.match(l, re_end_vendor, "jo")
+        if captures then
+            self.current_vendor_name = nil
             goto continue
         end
 
