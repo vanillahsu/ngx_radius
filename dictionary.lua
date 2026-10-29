@@ -52,7 +52,7 @@ function Dictionary:load_file(filename, base_dir)
         full_path = clean_base .. trimmed_name
     end
 
-    _log("INFO", "load_file: filename='" .. trimmed_name .. "', base_dir='" .. tostring(base_dir) .. "', full_path='" .. full_path .. "'")
+    _log("INFO", "load_file: filename='" .. trimmed_name .. "', base_dir='" .. tostr(base_dir) .. "', full_path='" .. full_path .. "'")
 
     -- 3. 檢查是否已載入
     if self.loaded_files[full_path] then
