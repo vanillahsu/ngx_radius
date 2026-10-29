@@ -38,52 +38,77 @@ function Dictionary:resolve_flags(name, vendor, flags)
     return 0
 end
 
-function Dictionary:load_file(filename)
-    if self.loaded_files[filename] then
-        _log("INFO", "Skipping already loaded file: " .. filename)
-        return true
-    end
-    self.loaded_files[filename] = true
-
-    local file = io.open(filename, "r")
-    if not file then
-        _log("ERROR", "Could not open dictionary file '" .. filename .. "'")
+function Dictionary:load_file(filename, base_dir)
+    local trimmed_name = filename:match("^%s*(.-)%s*$")
+    if not trimmed_name then
+        _log("ERROR", "Filename is empty or only whitespace")
         return nil
     end
-    self:load_handle(file, "file " .. filename)
+
+    -- 2. 計算完整路徑
+    local full_path = trimmed_name
+    if base_dir and not trimmed_name:match("^/") then
+        local clean_base = base_dir:sub(1, -1) == "/" and base_dir or base_dir .. "/"
+        full_path = clean_base .. trimmed_name
+    end
+
+    _log("INFO", "load_file: filename='" .. trimmed_name .. "', base_dir='" .. tostring(base_dir) .. "', full_path='" .. full_path .. "'")
+
+    -- 3. 檢查是否已載入
+    if self.loaded_files[full_path] then
+        _log("INFO", "Skipping already loaded file: " .. full_path)
+        return true
+    end
+    self.loaded_files[full_path] = true
+
+    -- 4. 開啟檔案
+    local file = io.open(full_path, "r")
+    if not file then
+        _log("ERROR", "Could not open dictionary file '" .. full_path .. "'")
+        return nil
+    end
+
+    -- 5. 計算當前目錄，供 $INCLUDE 使用
+    local new_dir = full_path:match("^(.*[/\\])") or "./"
+    _log("INFO", "Calculated new_dir: '" .. new_dir .. "'")
+
+    self:load_handle(file, "file " .. full_path, new_dir)
     file:close()
     return true
 end
 
-function Dictionary:load_handle(handle, handledesc)
+function Dictionary:load_handle(file, file_info, new_dir)
+    _log("INFO", "Loading handle for: " .. file_info)
+
     -- 預編譯正則表達式 (使用 jo: JIT + compile once)
     local re_comment = "#.*$"
-    local re_trim = "^\\s*(.*?)\\s*$"
-    local re_attr = "^ATTRIBUTE\\s+(\\S+)\\s+(\\d+)\\s+(\\S+)\\s*(\\S*)\\s*(\\S*)"
-    local re_vendor_attr = "^(\\S+)\\s+(\\S+)\\s+(\\S+)\\s+(\\S+)\\s*(\\S*)\\s*(\\S*)"
-    local re_val = "^VALUE\\s+(\\S+)\\s+(\\S+)\\s+(\\d+)"
-    local re_vendor = "^VENDOR\\s+(\\S+)\\s+(\\S+)\\s*(.*)"
-    local re_vendor_code = "^VENDOR_CODE\\s+(\\S+)\\s+(\\S+)\\s*(.*)"
-    local re_include = "^\\s*\\$INCLUDE\\s+(\\S+)\\s*$"
-    local re_begin_vendor = "^\\s*BEGIN-VENDOR\\s+(\\S+)\\s*$"
-    local re_end_vendor = "^\\s*END-VENDOR\\s+(\\S+)\\s*$"
+    local re_attr = "^ATTRIBUTE%s+(%S+)%s+(%d+)%s+(%S+)%s*(%S*)$"
+    local re_vendor_attr = "^(VENDORATTR|VSA|VENDOR_ATTRIBUTE)%s+(%S+)%s+(%d+)%s+(%S+)%s*(%S*)$"
+    local re_val = "^VALUE%s+(%S+)%s+(%S+)%s+(%d+)$"
+    local re_vendor = "^VENDOR%s+(%S+)%s+(%S+)%s*(.*)$"
+    local re_vendor_code = "^VENDOR_CODE%s+(%S+)%s+(%S+)%s*(.*)$"
+    local re_include = "^%s*%$INCLUDE%s+(%S+)%s*$"
+    local re_begin_vendor = "^%s*BEGIN-VENDOR%s+(%S+)%s*$"
+    local re_end_vendor = "^%s*END-VENDOR%s+(%S+)%s*$"
 
     while true do
-        local l = handle:read("*l")
+        local l = file:read("*l")
         if not l then break end
 
-        -- 移除註解與空白 (使用 ngx.re.gsub)
+        -- 1. 移除註解
         l = ngx.re.gsub(l, re_comment, "", "jo")
-        l = ngx.re.gsub(l, re_trim, "%1", "jo")
 
-        if l == "" then goto continue end
+        -- 2. 修剪前後空白 (使用 Lua 原生的 string.match)
+        l = l:match("^%s*(.-)%s*$")
 
-        -- 1. ATTRIBUTE pattern: ATTRIBUTE name number type [flags]
+        if not l or l == "" then goto continue end
+
+        -- 3. ATTRIBUTE pattern
         local captures = ngx.re.match(l, re_attr, "jo")
         if captures then
-            local name, num, atype, flag1, flag2 = captures[1], captures[2], captures[3], captures[4], captures[5]
+            local name, num, atype, flag1, flag2 = captures[2], captures[3], captures[4], captures[5], captures[6]
             if flag2 and flag2 ~= "" then
-                _log("WARNING", "Ignoring trailing garbage '" .. flag2 .. "' in Diameter dictionary " .. handledesc)
+                _log("WARNING", "Ignoring trailing garbage '" .. flag2 .. "' in Diameter dictionary " .. file_info)
             end
             local vendor_id = 0
             if self.current_vendor_name and self.VendorName[self.current_vendor_name] then
@@ -93,40 +118,35 @@ function Dictionary:load_handle(handle, handledesc)
             goto continue
         end
 
-        -- 2. VENDORATTR pattern: VENDORATTR|VSA|VENDOR_ATTRIBUTE vendornum name number type [flags]
+        -- 4. VENDORATTR pattern
         captures = ngx.re.match(l, re_vendor_attr, "jo")
         if captures then
-            local v_key, v_name, v_attrnum, v_type, v_flag1, v_flag2 = captures[1], captures[2], captures[3], captures[4], captures[5], captures[6]
+            local v_key, v_name, v_attrnum, v_type, v_flag1, v_flag2 = captures[2], captures[3], captures[4], captures[5], captures[6], captures[7]
             if v_key == "VENDORATTR" or v_key == "VSA" or v_key == "VENDOR_ATTRIBUTE" then
                 _log("DEBUG", "VENDORATTR match: key="..v_key..", name="..v_name..", num="..v_attrnum..", type="..v_type..", flag1="..v_flag1)
                 local vendor = v_name
-                -- 如果 vendor 是名稱，嘗試從 VendorName 查表轉為數字
                 if self.VendorName[v_name] then
                     vendor = self.VendorName[v_name][2]
                 end
 
-                -- 處理八進制 (Perl 的 oct 功能)
                 local attr_num = tonumber(v_attrnum)
                 if v_attrnum:sub(1,1) == "0" then
                     attr_num = tonumber(v_attrnum, 8)
                 end
 
                 v_flag2 = v_flag2 or ""
-                local v_garbage = v_flag2 -- 在這裡，v_flag2 是我們捕捉到的最後一個非空白字串
-
-                if v_garbage and v_garbage ~= "" then
-                    _log("WARNING", "Ignoring trailing garbage '" .. v_garbage .. "' in Diameter dictionary " .. handledesc)
+                if v_flag2 ~= "" then
+                    _log("WARNING", "Ignoring trailing garbage '" .. v_flag2 .. "' in Diameter dictionary " .. file_info)
                 end
 
-                -- 使用內部變數進行定義
-                local v_name_internal = captures[2]
-                local v_attrnum_internal = captures[3]
-                local v_type_internal = captures[4]
-                local v_flag1_internal = captures[5]
-                local v_garbage_internal = captures[6]
+                local v_name_internal = captures[3]
+                local v_attrnum_internal = captures[4]
+                local v_type_internal = captures[5]
+                local v_flag1_internal = captures[6]
+                local v_garbage_internal = captures[7]
 
                 if v_garbage_internal and v_garbage_internal ~= "" then
-                    _log("WARNING", "Ignoring trailing garbage '" .. v_garbage_internal .. "' in Diameter dictionary " .. handledesc)
+                    _log("WARNING", "Ignoring trailing garbage '" .. v_garbage_internal .. "' in Diameter dictionary " .. file_info)
                 end
 
                 local vendor_final = v_name_internal
@@ -144,39 +164,45 @@ function Dictionary:load_handle(handle, handledesc)
             end
         end
 
-        -- 3. VALUE pattern: VALUE attrname valname valnum
+        -- 5. VALUE pattern
         captures = ngx.re.match(l, re_val, "jo")
         if captures then
-            self:defineVal(captures[1], captures[2], tonumber(captures[3]))
+            self:defineVal(captures[2], captures[3], tonumber(captures[4]))
             goto continue
         end
 
-        -- 4. VENDOR pattern: VENDOR name number [extra]
+        -- 6. VENDOR pattern
         captures = ngx.re.match(l, re_vendor, "jo")
         if not captures then
             captures = ngx.re.match(l, re_vendor_code, "jo")
         end
 
         if captures then
-            self:defineVendor(captures[1], tonumber(captures[2]), captures[3])
+            self:defineVendor(captures[2], tonumber(captures[3]), captures[4])
             goto continue
         end
 
-        -- 5. $INCLUDE pattern: $INCLUDE filename
+        -- 7. $INCLUDE pattern
         captures = ngx.re.match(l, re_include, "jo")
         if captures then
-            self:load_file(captures[1])
+            local include_file = captures[2]
+            local full_include_path = include_file
+            if not include_file:match("^/") then
+                local clean_new_dir = new_dir:sub(1, -1) == "/" and new_dir or new_dir .. "/"
+                full_include_path = clean_new_dir .. include_file
+            end
+            self:load_file(full_include_path, new_dir)
             goto continue
         end
 
-        -- 6. BEGIN-VENDOR pattern: BEGIN-VENDOR <name>
+        -- 8. BEGIN-VENDOR pattern
         captures = ngx.re.match(l, re_begin_vendor, "jo")
         if captures then
-            self.current_vendor_name = captures[1]
+            self.current_vendor_name = captures[2]
             goto continue
         end
 
-        -- 7. END-VENDOR pattern: END-VENDOR <name>
+        -- 9. END-VENDOR pattern
         captures = ngx.re.match(l, re_end_vendor, "jo")
         if captures then
             self.current_vendor_name = nil
@@ -184,7 +210,7 @@ function Dictionary:load_handle(handle, handledesc)
         end
 
         -- 如果沒匹配到任何模式
-        _log("ERROR", "Bad format in dictionary " .. handledesc .. " at line: " .. l)
+        _log("ERROR", "Bad format in dictionary " .. file_info .. " at line: '" .. l .. "'")
 
         ::continue::
     end
