@@ -26,16 +26,47 @@ function Dictionary.new()
     return self
 end
 
--- 模擬 Perl 的 is_known_type (需被子類別覆寫)
+-- 已知類型的集合 (RADIUS / Diameter 常用類型)
+local KNOWN_TYPES = {
+    ["OctetString"] = true,
+    ["String"]      = true,
+    ["Integer"]     = true,
+    ["Time"]        = true,
+    -- Diameter
+    ["IPAddress"]   = true,
+    ["Unsigned32"]  = true,
+    ["Unsigned8"]   = true,
+    ["Unsigned16"]  = true,
+    ["Float32"]     = true,
+    ["Float64"]     = true,
+    ["DiameterIdentity"] = true,
+    ["DiameterURI"]     = true,
+}
+
+-- 檢查類型是否為已知的 RADIUS/Diameter 類型
 function Dictionary:is_known_type(type)
-    _log("ERROR", "Someone forgot to override Dictionary:is_known_type")
-    return false
+    return KNOWN_TYPES[type] == true
 end
 
--- 模擬 Perl 的 resolve_flags (需被子類別覆寫)
+-- 解析 flags：將字串 flags（如 "m", "p", "c"）轉換為數值
 function Dictionary:resolve_flags(name, vendor, flags)
-    _log("ERROR", "Someone forgot to override Dictionary:resolve_flags")
-    return 0
+    if not flags or flags == "" then
+        return 0
+    end
+    local result = 0
+    local flag_map = {
+        ["m"] = 1,  -- mandatory
+        ["p"] = 2,  -- protected
+        ["c"] = 4,  -- vendor-specific
+        ["t"] = 8,  -- tunnel
+    }
+    for i = 1, #flags do
+        local f = flags:sub(i, i)
+        if flag_map[f] then
+            result = result + flag_map[f]
+        end
+    end
+    return result
 end
 
 function Dictionary:load_file(filename, base_dir)
@@ -47,7 +78,7 @@ function Dictionary:load_file(filename, base_dir)
 
     -- 2. 計算完整路徑
     local full_path = trimmed_name
-    if base_dir and not trimmed_name:match("^/") then
+    if base_dir and not trimmed_name:match("[/\\]") then
         local clean_base = base_dir:sub(1, -1) == "/" and base_dir or base_dir .. "/"
         full_path = clean_base .. trimmed_name
     end
@@ -80,33 +111,21 @@ end
 function Dictionary:load_handle(file, file_info, new_dir)
     _log("INFO", "Loading handle for: " .. file_info)
 
-    -- 預編譯正則表達式 (使用 jo: JIT + compile once)
-    local re_comment = "#.*$"
-    local re_attr = "^ATTRIBUTE%s+(%S+)%s+(%d+)%s+(%S+)%s*(%S*)$"
-    local re_vendor_attr = "^(VENDORATTR|VSA|VENDOR_ATTRIBUTE)%s+(%S+)%s+(%d+)%s+(%S+)%s*(%S*)$"
-    local re_val = "^VALUE%s+(%S+)%s+(%S+)%s+(%d+)$"
-    local re_vendor = "^VENDOR%s+(%S+)%s+(%S+)%s*(.*)$"
-    local re_vendor_code = "^VENDOR_CODE%s+(%S+)%s+(%S+)%s*(.*)$"
-    local re_include = "^%s*%$INCLUDE%s+(%S+)%s*$"
-    local re_begin_vendor = "^%s*BEGIN-VENDOR%s+(%S+)%s*$"
-    local re_end_vendor = "^%s*END-VENDOR%s+(%S+)%s*$"
-
     while true do
         local l = file:read("*l")
         if not l then break end
 
         -- 1. 移除註解
-        l = ngx.re.gsub(l, re_comment, "", "jo")
+        l = l:gsub("#.*$", "")
 
-        -- 2. 修剪前後空白 (使用 Lua 原生的 string.match)
+        -- 2. 修剪前後空白
         l = l:match("^%s*(.-)%s*$")
 
         if not l or l == "" then goto continue end
 
         -- 3. ATTRIBUTE pattern
-        local captures = ngx.re.match(l, re_attr, "jo")
-        if captures then
-            local name, num, atype, flag1, flag2 = captures[2], captures[3], captures[4], captures[5], captures[6]
+        local name, num, atype, flag1, flag2 = l:match("^ATTRIBUTE%s+(%S+)%s+(%d+)%s+(%S*)%s*(%S*)%s*$")
+        if name then
             if flag2 and flag2 ~= "" then
                 _log("WARNING", "Ignoring trailing garbage '" .. flag2 .. "' in Diameter dictionary " .. file_info)
             end
@@ -114,97 +133,86 @@ function Dictionary:load_handle(file, file_info, new_dir)
             if self.current_vendor_name and self.VendorName[self.current_vendor_name] then
                 vendor_id = self.VendorName[self.current_vendor_name][2]
             end
-            self:defineAttr(tonumber(num), vendor_id, name, atype, flag1)
+            self:defineAttr(name, atype, tonumber(num), vendor_id, flag1)
             goto continue
         end
 
         -- 4. VENDORATTR pattern
-        captures = ngx.re.match(l, re_vendor_attr, "jo")
-        if captures then
-            local v_key, v_name, v_attrnum, v_type, v_flag1, v_flag2 = captures[2], captures[3], captures[4], captures[5], captures[6], captures[7]
-            if v_key == "VENDORATTR" or v_key == "VSA" or v_key == "VENDOR_ATTRIBUTE" then
-                _log("DEBUG", "VENDORATTR match: key="..v_key..", name="..v_name..", num="..v_attrnum..", type="..v_type..", flag1="..v_flag1)
-                local vendor = v_name
-                if self.VendorName[v_name] then
-                    vendor = self.VendorName[v_name][2]
-                end
-
-                local attr_num = tonumber(v_attrnum)
-                if v_attrnum:sub(1,1) == "0" then
-                    attr_num = tonumber(v_attrnum, 8)
-                end
-
-                v_flag2 = v_flag2 or ""
-                if v_flag2 ~= "" then
-                    _log("WARNING", "Ignoring trailing garbage '" .. v_flag2 .. "' in Diameter dictionary " .. file_info)
-                end
-
-                local v_name_internal = captures[3]
-                local v_attrnum_internal = captures[4]
-                local v_type_internal = captures[5]
-                local v_flag1_internal = captures[6]
-                local v_garbage_internal = captures[7]
-
-                if v_garbage_internal and v_garbage_internal ~= "" then
-                    _log("WARNING", "Ignoring trailing garbage '" .. v_garbage_internal .. "' in Diameter dictionary " .. file_info)
-                end
-
-                local vendor_final = v_name_internal
-                if self.VendorName[v_name_internal] then
-                    vendor_final = self.VendorName[v_name_internal][2]
-                end
-
-                local attr_num_final = tonumber(v_attrnum_internal)
-                if v_attrnum_internal:sub(1,1) == "0" then
-                    attr_num_final = tonumber(v_attrnum_internal, 8)
-                end
-
-                self:defineAttr(tonumber(attr_num_final), tonumber(vendor_final), v_type_internal, v_flag1_internal)
-                goto continue
+        local v_key, v_name, v_attrnum, v_type, v_flag1, v_flag2 = l:match("^%s*(%S+)%s+(%S+)%s+(%d+)%s+(%S+)%s*(%S*)%s*$")
+        if v_key and (v_key == "VENDORATTR" or v_key == "VSA" or v_key == "VENDOR_ATTRIBUTE") then
+            _log("DEBUG", "VENDORATTR match: key="..v_key..", name="..v_name..", num="..v_attrnum..", type="..v_type..", flag1="..v_flag1)
+            local vendor = v_name
+            if self.VendorName[v_name] then
+                vendor = self.VendorName[v_name][2]
             end
-        end
 
-        -- 5. VALUE pattern
-        captures = ngx.re.match(l, re_val, "jo")
-        if captures then
-            self:defineVal(captures[2], captures[3], tonumber(captures[4]))
+            local attr_num = tonumber(v_attrnum)
+            if v_attrnum:sub(1,1) == "0" then
+                attr_num = tonumber(v_attrnum, 8)
+            end
+
+            if v_flag2 and v_flag2 ~= "" then
+                _log("WARNING", "Ignoring trailing garbage '" .. v_flag2 .. "' in Diameter dictionary " .. file_info)
+            end
+
+            local v_name_internal = v_name
+            local v_attrnum_internal = v_attrnum
+            local v_type_internal = v_type
+            local v_flag1_internal = v_flag1
+            local v_garbage_internal = v_flag2
+
+            if v_garbage_internal and v_garbage_internal ~= "" then
+                _log("WARNING", "Ignoring trailing garbage '" .. v_garbage_internal .. "' in Diameter dictionary " .. file_info)
+            end
+
+            local vendor_final = v_name_internal
+            if self.VendorName[v_name_internal] then
+                vendor_final = self.VendorName[v_name_internal][2]
+            end
+
+            local attr_num_final = tonumber(v_attrnum_internal)
+            if v_attrnum_internal:sub(1,1) == "0" then
+                attr_num_final = tonumber(v_attrnum_internal, 8)
+            end
+
+            self:defineAttr(v_name, v_type, attr_num_final, vendor_final, v_flag1)
             goto continue
         end
 
-        -- 6. VENDOR pattern
-        captures = ngx.re.match(l, re_vendor, "jo")
-        if not captures then
-            captures = ngx.re.match(l, re_vendor_code, "jo")
+        -- 5. VALUE pattern
+        local val_name, val_num = l:match("^VALUE%s+(%S+)%s+(%S+)%s+(%d+)$")
+        if val_name then
+            self:defineVal(val_name, val_num, tonumber(val_num))
+            goto continue
         end
 
-        if captures then
-            self:defineVendor(captures[2], tonumber(captures[3]), captures[4])
+        -- 6. VENDOR pattern (排除 BEGIN-VENDOR / END-VENDOR)
+        local vend_name, vend_num, vend_extra = l:match("^%s*VENDOR%s+(%S+)%s+(%S+)%s*(.*)$")
+        if vend_name then
+            -- 確認不是 BEGIN-VENDOR 或 END-VENDOR
+            if vend_name ~= "VENDOR" or (not l:match("^BEGIN-VENDOR") and not l:match("^END-VENDOR")) then
+                self:defineVendor(vend_name, tonumber(vend_num), vend_extra)
+            end
             goto continue
         end
 
         -- 7. $INCLUDE pattern
-        captures = ngx.re.match(l, re_include, "jo")
-        if captures then
-            local include_file = captures[2]
-            local full_include_path = include_file
-            if not include_file:match("^/") then
-                local clean_new_dir = new_dir:sub(1, -1) == "/" and new_dir or new_dir .. "/"
-                full_include_path = clean_new_dir .. include_file
-            end
-            self:load_file(full_include_path, new_dir)
+        local include_file = l:match("^%s*%$INCLUDE%s+(%S+)%s*$")
+        if include_file then
+            self:load_file(include_file, new_dir)
             goto continue
         end
 
         -- 8. BEGIN-VENDOR pattern
-        captures = ngx.re.match(l, re_begin_vendor, "jo")
-        if captures then
-            self.current_vendor_name = captures[2]
+        local begin_name = l:match("^%s*BEGIN%-VENDOR%s+(%S+)%s*$")
+        if begin_name then
+            self.current_vendor_name = begin_name
             goto continue
         end
 
         -- 9. END-VENDOR pattern
-        captures = ngx.re.match(l, re_end_vendor, "jo")
-        if captures then
+        local end_name = l:match("^%s*END%-VENDOR%s+(%S+)%s*$")
+        if end_name then
             self.current_vendor_name = nil
             goto continue
         end
@@ -217,19 +225,15 @@ function Dictionary:load_handle(file, file_info, new_dir)
     return true
 end
 
-function Dictionary:defineAttr(number, vendor, name, type, flags)
+function Dictionary:defineAttr(name, type, number, vendor, flags)
     if not self:is_known_type(type) then
         _log("WARNING", "Bad type " .. type .. " for attribute " .. name .. " in dictionary. Encoding and decoding this attribute may fail.")
     end
-
     local resolvedflags = self:resolve_flags(name, vendor, flags)
-    vendor = vendor or 0
     local a = {name, type, number, vendor, resolvedflags}
-
+    self.AttrName[name] = a
     self.AttrNum[vendor] = self.AttrNum[vendor] or {}
     self.AttrNum[vendor][number] = a
-    self.AttrName[name] = a
-
     return a
 end
 
@@ -265,8 +269,8 @@ function Dictionary:attrByNum(number, vendor)
 end
 
 function Dictionary:valByNum(attrname, valnum)
-    if self.ValNum[attrname] and self.ValNum[attrname][valnum] then
-        return self.ValNum[attrname][valnum]
+    if self.ValName[attrname] and self.ValNum[attrname][valnum] then
+        return self.ValName[attrname][valnum]
     end
     return nil
 end

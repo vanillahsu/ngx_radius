@@ -24,7 +24,7 @@ subtest 'test connection and lua execution' => sub {
         my $response = <$socket>;
 
         # 驗證回傳內容
-        like($response, qr/Connection established/, "Nginx Lua logic responded correctly");
+        like($response, qr/Dictionary loaded/, "Nginx Lua logic responded correctly");
 
         $socket->close;
     }
