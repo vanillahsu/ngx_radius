@@ -23,6 +23,7 @@ function Dictionary.new()
     self.VendorNum = {}  -- VendorNum{vendornum}
     self.loaded_files = {} -- 防止循環引用與重複載入
     self.current_vendor_name = nil -- 當前廠商名稱
+    self.current_tlv_name = nil    -- 當前 TLV 名稱
     return self
 end
 
@@ -213,7 +214,29 @@ function Dictionary:load_handle(file, file_info, new_dir)
         -- 9. END-VENDOR pattern
         local end_name = l:match("^%s*END%-VENDOR%s+(%S+)%s*$")
         if end_name then
+            if self.current_tlv_name then
+                _log("WARNING", "Found END-VENDOR but TLV '" .. self.current_tlv_name .. "' was not closed. Auto-closing TLV.")
+                self.current_tlv_name = nil
+            end
             self.current_vendor_name = nil
+            goto continue
+        end
+
+        -- 10. BEGIN-TLV pattern
+        local tlv_name = l:match("^%s*BEGIN%-TLV%s+(%S+)%s*$")
+        if tlv_name then
+            self.current_tlv_name = tlv_name
+            goto continue
+        end
+
+        -- 11. END-TLV pattern
+        local end_tlv_name = l:match("^%s*END%-TLV%s+(%S+)%s*$")
+        if end_tlv_name then
+            if self.current_tlv_name and self.current_tlv_name == end_tlv_name then
+                self.current_tlv_name = nil
+            else
+                _log("WARNING", "Mismatch or unexpected END-TLV: " .. end_tlv_name .. " (current: " .. tostring(self.current_tlv_name) .. ")")
+            end
             goto continue
         end
 

@@ -1,13 +1,10 @@
 FROM openresty/openresty:alpine
 
-# 1. 安裝 Perl 與編譯工具
-RUN apk add --no-cache perl make gcc musl-dev perl-dev wget
+# 1. 安裝 Perl, lua 與編譯工具
+RUN apk add --no-cache perl lua make gcc musl-dev perl-dev wget
 
 # 2. 手動安裝 cpanm
-RUN wget https://cpanmin.us -O cpanm && chmod +x cpanm && ./cpanm
-
-# 3. 安裝 Test::Nginx
-RUN ./cpanm Test::Nginx
+RUN wget https://cpanmin.us -O cpanm && chmod +x cpanm && ./cpanm Test::Nginx
 
 WORKDIR /app
 
@@ -32,7 +29,17 @@ NGINX_PID=$!
 echo "等待 Nginx 啟動..."
 sleep 2
 
-echo "正在執行測試 (test_stream.t)..."
+echo "正在執行單元測試 (test_tlv.lua)..."
+lua5.5 "$APP_DIR/test_tlv.lua"
+TLV_RESULT=$?
+
+if [ $TLV_RESULT -ne 0 ]; then
+    echo "❌ TLV 單元測試失敗!"
+    kill $NGINX_PID
+    exit 1
+fi
+
+echo "正在執行整合測試 (test_stream.t)..."
 # 執行 Perl 測試腳本
 perl test_stream.t
 TEST_RESULT=$?

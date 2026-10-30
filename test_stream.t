@@ -25,6 +25,10 @@ subtest 'test connection and lua execution' => sub {
 
         # 驗證回傳內容
         like($response, qr/Dictionary loaded/, "Nginx Lua logic responded correctly");
+        like($response, qr/\[TestAttr=OK\]/, "TestAttr is OK");
+        like($response, qr/\[TestVendor=OK\]/, "TestVendor is OK");
+        like($response, qr/\[TLV=OK\]/, "TLV Attr is OK");
+        like($response, qr/\[Sub=OK\]/, "Sub Attr is OK");
 
         $socket->close;
     }

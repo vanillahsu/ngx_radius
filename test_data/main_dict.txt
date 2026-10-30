@@ -3,3 +3,4 @@ BEGIN-VENDOR TestVendor
 ATTRIBUTE TestAttr 10 OctetString
 END-VENDOR TestVendor
 $INCLUDE include_part.txt
+$INCLUDE include_tlv.txt

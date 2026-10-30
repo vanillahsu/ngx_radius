@@ -1,0 +1,6 @@
+# TLV Attributes
+ATTRIBUTE WiMAX-Capability 1 tlv
+BEGIN-TLV WiMAX-Capability
+ATTRIBUTE WiMAX-Release 1 string
+ATTRIBUTE WiMAX-Accounting-Capabilities 2 byte
+END-TLV WiMAX-Capability
